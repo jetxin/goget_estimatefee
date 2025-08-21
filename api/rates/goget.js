@@ -5,14 +5,14 @@ export default async function handler(req, res) {
   // - Prefer header:   X-Callback-Token: <secret>
   // - Or body:         { "callback_token": "<secret>" }
   const providedToken =
-    req.headers["x-callback-token"] ||
-    (req.body && req.body.callback_token) ||
-    null;
+  req.headers["x-callback-token"] ||
+  (req.body && req.body.callback_token) ||
+  (req.query && req.query.token) ||
+  null;
 
-  if (process.env.RATE_CALLBACK_TOKEN && providedToken !== process.env.RATE_CALLBACK_TOKEN) {
-    // If you want no auth at all, simply do not define RATE_CALLBACK_TOKEN in Vercel
-    return res.status(401).json({ rates: [] });
-  }
+if (process.env.RATE_CALLBACK_TOKEN && providedToken !== process.env.RATE_CALLBACK_TOKEN) {
+  return res.status(401).json({ rates: [] });
+}
 
   try {
     const body = req.body || {};
