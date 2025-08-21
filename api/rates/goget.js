@@ -1,30 +1,39 @@
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
-  // Shared secret to prevent random calls
-  if (req.query.token !== process.env.RATE_CALLBACK_TOKEN) {
+  // Auth without query params:
+  // - Prefer header:   X-Callback-Token: <secret>
+  // - Or body:         { "callback_token": "<secret>" }
+  const providedToken =
+    req.headers["x-callback-token"] ||
+    (req.body && req.body.callback_token) ||
+    null;
+
+  if (process.env.RATE_CALLBACK_TOKEN && providedToken !== process.env.RATE_CALLBACK_TOKEN) {
+    // If you want no auth at all, simply do not define RATE_CALLBACK_TOKEN in Vercel
     return res.status(401).json({ rates: [] });
   }
 
   try {
-    const { rate } = req.body || {};
-    if (!rate) return res.json({ rates: [] });
+    const body = req.body || {};
+    const rate = body.rate || {}; // Shopify payload (origin, destination, items, currency)
 
-    // Inputs (prefer query overrides for testing; use env in production)
+    // Inputs from body (preferred) with env fallbacks
     const gogetEndpoint =
-      req.query.endpoint || process.env.GOGET_API_ENDPOINT;
-    const gogetTokenFromQuery = req.query.gg_token;
-    const gogetAuthHeaderOverride = req.query.gg_auth; // if you want to pass the full Authorization header
-    const gogetTokenEnv = process.env.GOGET_API_TOKEN;
+      (body.goget && body.goget.endpoint) || process.env.GOGET_API_ENDPOINT;
 
+    // Authorization preference: full header -> token -> env token
+    const authorizationHeader =
+      (body.goget && body.goget.authorization) ||
+      (body.goget && body.goget.token ? `Token token=${body.goget.token}` : null) ||
+      (process.env.GOGET_API_TOKEN ? `Token token=${process.env.GOGET_API_TOKEN}` : null);
+
+    // Pickup inputs
+    const pickupInput = body.pickup || {};
     const pickupName =
-      req.query.pickup_name || process.env.DEFAULT_PICKUP_NAME || "Shop Origin";
-
-    // If you pass an explicit pickup address, we’ll geocode it.
-    // Otherwise we fall back to Shopify origin address string.
-    const pickupAddressOverride = req.query.pickup_location;
+      pickupInput.name || process.env.DEFAULT_PICKUP_NAME || "Shop Origin";
     const pickupAddress =
-      pickupAddressOverride ||
+      pickupInput.location ||
       [
         rate.origin?.address1,
         rate.origin?.address2,
@@ -35,11 +44,13 @@ export default async function handler(req, res) {
       ]
         .filter(Boolean)
         .join(", ");
+    const pickupLat = numberOrNull(pickupInput.lat);
+    const pickupLng = numberOrNull(pickupInput.lng);
 
-    // Dropoff: use explicit override if provided, else Shopify destination address
-    const dropoffAddressOverride = req.query.dropoff_location;
+    // Dropoff inputs
+    const dropoffInput = body.dropoff || {};
     const dropoffAddress =
-      dropoffAddressOverride ||
+      dropoffInput.location ||
       [
         rate.destination?.address1,
         rate.destination?.address2,
@@ -50,39 +61,35 @@ export default async function handler(req, res) {
       ]
         .filter(Boolean)
         .join(", ");
+    const dropoffLat = numberOrNull(dropoffInput.lat);
+    const dropoffLng = numberOrNull(dropoffInput.lng);
 
-    // start_at: ISO string, otherwise now
+    // Time
     const startAt =
-      req.query.start_at ||
-      new Date().toISOString(); // pass an ISO like 2023-10-02T10:00:00+08:00 if you need a specific time
+      pickupInput.start_at ||
+      new Date().toISOString(); // pass ISO string in body.pickup.start_at to override
 
-    if (!gogetEndpoint) return res.json({ rates: [] });
-    const authorizationHeader =
-      gogetAuthHeaderOverride ||
-      (gogetTokenFromQuery
-        ? `Token token=${gogetTokenFromQuery}`
-        : gogetTokenEnv
-        ? `Token token=${gogetTokenEnv}`
-        : null);
-
-    if (!authorizationHeader) return res.json({ rates: [] });
+    // Required fields
+    if (!gogetEndpoint || !authorizationHeader) return res.json({ rates: [] });
     if (!pickupAddress || !dropoffAddress) return res.json({ rates: [] });
 
     // Country bias for geocoding
     const countryBias =
       (rate.destination?.country || rate.origin?.country || "").toLowerCase();
 
-    // Geocode both pickup and dropoff via OpenStreetMap
-    const [pickupGeo, dropoffGeo] = await Promise.all([
-      geocodeAddress(pickupAddress, countryBias),
-      geocodeAddress(dropoffAddress, countryBias),
-    ]);
+    // Geocode if lat/lng not provided
+    const [pickupGeo, dropoffGeo] = await resolveCoordinates({
+      pickupAddress,
+      pickupLat,
+      pickupLng,
+      dropoffAddress,
+      dropoffLat,
+      dropoffLng,
+      countryBias,
+    });
+    if (!pickupGeo || !dropoffGeo) return res.json({ rates: [] });
 
-    if (!pickupGeo || !dropoffGeo) {
-      return res.json({ rates: [] });
-    }
-
-    // Build GoGet payload exactly as required
+    // Build GoGet payload
     const gogetPayload = {
       pickup: {
         name: pickupName,
@@ -125,12 +132,11 @@ export default async function handler(req, res) {
     if (!ggResp || !ggResp.ok) return res.json({ rates: [] });
     const quote = await ggResp.json();
 
-    // Try common shapes: {data:{fee}}, {fee}, {total_fee}
+    // Common response shapes
     const fee =
       numberOrNull(quote?.data?.fee) ??
       numberOrNull(quote?.total_fee) ??
       numberOrNull(quote?.fee);
-
     if (!Number.isFinite(fee)) return res.json({ rates: [] });
 
     const priceMinor = Math.round(fee * 100);
@@ -152,6 +158,26 @@ export default async function handler(req, res) {
 function numberOrNull(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+async function resolveCoordinates({
+  pickupAddress,
+  pickupLat,
+  pickupLng,
+  dropoffAddress,
+  dropoffLat,
+  dropoffLng,
+  countryBias,
+}) {
+  const [pickupGeo, dropoffGeo] = await Promise.all([
+    pickupLat != null && pickupLng != null
+      ? { lat: pickupLat, lng: pickupLng }
+      : geocodeAddress(pickupAddress, countryBias),
+    dropoffLat != null && dropoffLng != null
+      ? { lat: dropoffLat, lng: dropoffLng }
+      : geocodeAddress(dropoffAddress, countryBias),
+  ]);
+  return [pickupGeo, dropoffGeo];
 }
 
 async function geocodeAddress(address, countryCodeLower) {
