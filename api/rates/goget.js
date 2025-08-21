@@ -169,19 +169,32 @@ async function resolveCoordinates({
   dropoffLng,
   countryBias,
 }) {
-  const [pickupGeo, dropoffGeo] = await Promise.all([
-    pickupLat != null && pickupLng != null
+  const pickupGeo =
+    (Number.isFinite(pickupLat) && Number.isFinite(pickupLng))
       ? { lat: pickupLat, lng: pickupLng }
-      : geocodeAddress(pickupAddress, countryBias),
-    dropoffLat != null && dropoffLng != null
+      : await geocodeAddress(pickupAddress, countryBias);
+
+  if (!pickupGeo) return [null, null];
+
+  const dropoffGeo =
+    (Number.isFinite(dropoffLat) && Number.isFinite(dropoffLng))
       ? { lat: dropoffLat, lng: dropoffLng }
-      : geocodeAddress(dropoffAddress, countryBias),
-  ]);
+      : await geocodeAddress(dropoffAddress, countryBias, pickupGeo);
+
   return [pickupGeo, dropoffGeo];
 }
 
-async function geocodeAddress(address, countryCodeLower) {
+function buildViewbox(lat, lng, delta = 0.27) {
+  const left = (lng - delta).toFixed(6);
+  const right = (lng + delta).toFixed(6);
+  const top = (lat + delta).toFixed(6);
+  const bottom = (lat - delta).toFixed(6);
+  return `${left},${top},${right},${bottom}`;
+}
+
+async function geocodeAddress(address, countryCodeLower, bias) {
   if (!address) return null;
+
   const params = new URLSearchParams({
     format: "jsonv2",
     q: address,
@@ -189,32 +202,43 @@ async function geocodeAddress(address, countryCodeLower) {
     addressdetails: "0",
   });
   if (countryCodeLower) params.set("countrycodes", countryCodeLower);
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3000);
-
-  try {
-    const r = await fetch(
-      `https://nominatim.openstreetmap.org/search?${params.toString()}`,
-      {
-        headers: {
-          Accept: "application/json",
-          "User-Agent": `goget-carrier/1.0 (${process.env.NOMINATIM_EMAIL || "email@example.com"})`,
-        },
-        signal: controller.signal,
-      }
-    );
-    if (!r.ok) return null;
-    const arr = await r.json();
-    if (!Array.isArray(arr) || arr.length === 0) return null;
-    const { lat, lon } = arr[0];
-    const latNum = Number(lat);
-    const lngNum = Number(lon);
-    if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
-    return { lat: latNum, lng: lngNum };
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
+  if (bias && Number.isFinite(bias.lat) && Number.isFinite(bias.lng)) {
+    params.set("viewbox", buildViewbox(bias.lat, bias.lng));
+    params.set("bounded", "1");
   }
+
+  const headers = {
+    Accept: "application/json",
+    "User-Agent": `goget-carrier/1.0 (${process.env.NOMINATIM_EMAIL || "email@example.com"})`,
+  };
+
+  const tryOnce = async (timeoutMs) => {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const r = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+        headers,
+        signal: controller.signal,
+      });
+      if (!r.ok) return null;
+      const arr = await r.json();
+      if (!Array.isArray(arr) || arr.length === 0) return null;
+      const { lat, lon } = arr[0];
+      const latNum = Number(lat);
+      const lngNum = Number(lon);
+      if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
+      return { lat: latNum, lng: lngNum };
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(t);
+    }
+  };
+
+  for (const ms of [2500, 3500, 4500]) {
+    const result = await tryOnce(ms);
+    if (result) return result;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return null;
 }
