@@ -28,24 +28,31 @@ export default async function handler(req, res) {
       (body.goget && body.goget.token ? `Token token=${body.goget.token}` : null) ||
       (process.env.GOGET_API_TOKEN ? `Token token=${process.env.GOGET_API_TOKEN}` : null);
 
-    // Pickup inputs
-    const pickupInput = body.pickup || {};
-    const pickupName =
-      pickupInput.name || process.env.DEFAULT_PICKUP_NAME || "Shop Origin";
-    const pickupAddress =
-      pickupInput.location ||
-      [
-        rate.origin?.address1,
-        rate.origin?.address2,
-        rate.origin?.city,
-        rate.origin?.province,
-        rate.origin?.zip,
-        rate.origin?.country,
-      ]
-        .filter(Boolean)
-        .join(", ");
-    const pickupLat = numberOrNull(pickupInput.lat);
-    const pickupLng = numberOrNull(pickupInput.lng);
+    // Pickup inputs (prefer env defaults; then body; then Shopify origin)
+const pickupInput = body.pickup || {};
+const pickupName =
+  process.env.DEFAULT_PICKUP_NAME ||
+  pickupInput.name ||
+  "Shop Origin";
+
+const pickupAddress =
+  process.env.DEFAULT_PICKUP_ADDRESS ||
+  pickupInput.location ||
+  [
+    rate.origin?.address1,
+    rate.origin?.address2,
+    rate.origin?.city,
+    rate.origin?.province,
+    rate.origin?.zip,
+    rate.origin?.country,
+  ].filter(Boolean).join(", ");
+
+const pickupLat = numberOrNull(
+  pickupInput.lat ?? process.env.DEFAULT_PICKUP_LAT
+);
+const pickupLng = numberOrNull(
+  pickupInput.lng ?? process.env.DEFAULT_PICKUP_LNG
+);
 
     // Dropoff inputs
     const dropoffInput = body.dropoff || {};
