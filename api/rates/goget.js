@@ -114,7 +114,7 @@ async function geocodeAddress({ address, country }) {
     const r = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
       headers: {
         Accept: "application/json",
-        "User-Agent": `goget-carrier/1.0 (${process.env.NOMINATIM_EMAIL || "email@example.com"})`,
+        "User-Agent": `goget-carrier/1.0 (${process.env.NOMINATIM_EMAIL})`,
       },
       signal: controller.signal,
     });
