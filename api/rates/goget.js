@@ -1,102 +1,64 @@
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
-  // Auth without query params:
-  // - Prefer header:   X-Callback-Token: <secret>
-  // - Or body:         { "callback_token": "<secret>" }
+  // Auth via query token (Shopify cannot send custom headers)
   const providedToken =
-  req.headers["x-callback-token"] ||
-  (req.body && req.body.callback_token) ||
-  (req.query && req.query.token) ||
-  null;
+    (req.query && req.query.token) ||
+    null;
 
-if (process.env.RATE_CALLBACK_TOKEN && providedToken !== process.env.RATE_CALLBACK_TOKEN) {
-  return res.status(401).json({ rates: [] });
-}
+  if (process.env.RATE_CALLBACK_TOKEN && providedToken !== process.env.RATE_CALLBACK_TOKEN) {
+    return res.status(401).json({ rates: [] });
+  }
 
   try {
     const body = req.body || {};
-    const rate = body.rate || {}; // Shopify payload (origin, destination, items, currency)
+    const rate = body.rate || {};
 
-    // Inputs from body (preferred) with env fallbacks
-    const gogetEndpoint =
-      (body.goget && body.goget.endpoint) || process.env.GOGET_API_ENDPOINT;
+    // Required env
+    const gogetEndpoint = process.env.GOGET_API_ENDPOINT;
+    const gogetToken = process.env.GOGET_API_TOKEN; // just the token value
+    if (!gogetEndpoint || !gogetToken) {
+      return res.json(maybeDebug({ rates: [], reason: "missing_goget_env" }));
+    }
+    const authorizationHeader = `Token token=${gogetToken}`;
 
-    // Authorization preference: full header -> token -> env token
-    const authorizationHeader =
-      (body.goget && body.goget.authorization) ||
-      (body.goget && body.goget.token ? `Token token=${body.goget.token}` : null) ||
-      (process.env.GOGET_API_TOKEN ? `Token token=${process.env.GOGET_API_TOKEN}` : null);
+    // Build pickup and dropoff from Shopify payload
+    const pickupName =
+      process.env.DEFAULT_PICKUP_NAME ||
+      rate.origin?.name ||
+      "Shop Origin";
 
-    // Pickup inputs (prefer env defaults; then body; then Shopify origin)
-const pickupInput = body.pickup || {};
-const pickupName =
-  process.env.DEFAULT_PICKUP_NAME ||
-  pickupInput.name ||
-  "Shop Origin";
+    const pickupAddress = joinAddress(rate.origin);
+    const dropoffAddress = joinAddress(rate.destination);
 
-const pickupAddress =
-  process.env.DEFAULT_PICKUP_ADDRESS ||
-  pickupInput.location ||
-  [
-    rate.origin?.address1,
-    rate.origin?.address2,
-    rate.origin?.city,
-    rate.origin?.province,
-    rate.origin?.zip,
-    rate.origin?.country,
-  ].filter(Boolean).join(", ");
+    if (!pickupAddress || !dropoffAddress) {
+      return res.json(maybeDebug({ rates: [], reason: "missing_addresses" }));
+    }
 
-const pickupLat = numberOrNull(
-  pickupInput.lat ?? process.env.DEFAULT_PICKUP_LAT
-);
-const pickupLng = numberOrNull(
-  pickupInput.lng ?? process.env.DEFAULT_PICKUP_LNG
-);
+    // Resolve coordinates
+    const countryBias = (rate.destination?.country || rate.origin?.country || "").toLowerCase();
+    const pickupLatEnv = toNum(process.env.DEFAULT_PICKUP_LAT);
+    const pickupLngEnv = toNum(process.env.DEFAULT_PICKUP_LNG);
 
-    // Dropoff inputs
-    const dropoffInput = body.dropoff || {};
-    const dropoffAddress =
-      dropoffInput.location ||
-      [
-        rate.destination?.address1,
-        rate.destination?.address2,
-        rate.destination?.city,
-        rate.destination?.province,
-        rate.destination?.zip,
-        rate.destination?.country,
-      ]
-        .filter(Boolean)
-        .join(", ");
-    const dropoffLat = numberOrNull(dropoffInput.lat);
-    const dropoffLng = numberOrNull(dropoffInput.lng);
+    // Prefer env pickup coords if provided (avoid geocoding pickup each call)
+    const pickupGeo = Number.isFinite(pickupLatEnv) && Number.isFinite(pickupLngEnv)
+      ? { lat: pickupLatEnv, lng: pickupLngEnv }
+      : await geocodeAddress(pickupAddress, countryBias);
 
-    // Time
-    const startAt =
-      pickupInput.start_at ||
-      new Date().toISOString(); // pass ISO string in body.pickup.start_at to override
+    if (!pickupGeo) {
+      return res.json(maybeDebug({ rates: [], reason: "geocode_pickup_failed" }));
+    }
 
-    // Required fields
-    if (!gogetEndpoint || !authorizationHeader) return res.json({ rates: [] });
-    if (!pickupAddress || !dropoffAddress) return res.json({ rates: [] });
+    // Bias dropoff around pickup
+    const dropoffGeo = await geocodeAddress(dropoffAddress, countryBias, pickupGeo);
+    if (!dropoffGeo) {
+      return res.json(maybeDebug({ rates: [], reason: "geocode_dropoff_failed" }));
+    }
 
-    // Country bias for geocoding
-    const countryBias =
-      (rate.destination?.country || rate.origin?.country || "").toLowerCase();
+    // Start time: now + 5 minutes
+    const startAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
 
-    // Geocode if lat/lng not provided
-    const [pickupGeo, dropoffGeo] = await resolveCoordinates({
-      pickupAddress,
-      pickupLat,
-      pickupLng,
-      dropoffAddress,
-      dropoffLat,
-      dropoffLng,
-      countryBias,
-    });
-    if (!pickupGeo || !dropoffGeo) return res.json({ rates: [] });
-
-    // Build GoGet payload
+    // GoGet payload
     const gogetPayload = {
       pickup: {
         name: pickupName,
@@ -136,18 +98,23 @@ const pickupLng = numberOrNull(
     }).catch(() => null);
     clearTimeout(timeout);
 
-    if (!ggResp || !ggResp.ok) return res.json({ rates: [] });
+    if (!ggResp || !ggResp.ok) {
+      const text = await safeText(ggResp);
+      return res.json(maybeDebug({ rates: [], reason: "goget_bad_response", status: ggResp?.status, body: text }));
+    }
+
     const quote = await ggResp.json();
-
-    // Common response shapes
     const fee =
-      numberOrNull(quote?.data?.fee) ??
-      numberOrNull(quote?.total_fee) ??
-      numberOrNull(quote?.fee);
-    if (!Number.isFinite(fee)) return res.json({ rates: [] });
+      toNum(quote?.data?.fee) ??
+      toNum(quote?.total_fee) ??
+      toNum(quote?.fee);
 
-    const priceMinor = Math.round(fee * 100);
-    return res.json({
+    if (!Number.isFinite(fee)) {
+      return res.json(maybeDebug({ rates: [], reason: "no_fee_in_response", quote }));
+    }
+
+    const priceMinor = Math.round(fee * 100); // RM 13.00 -> "1300"
+    const responseBody = {
       rates: [
         {
           service_name: "GoGet Delivery",
@@ -156,39 +123,29 @@ const pickupLng = numberOrNull(
           currency: rate.currency || "MYR",
         },
       ],
-    });
-  } catch {
-    return res.json({ rates: [] });
+    };
+
+    return res.json(maybeDebug({ ...responseBody, gogetFee: fee, payloadSent: maybePayload(gogetPayload) }));
+  } catch (e) {
+    return res.json(maybeDebug({ rates: [], reason: "unhandled_error" }));
   }
 }
 
-function numberOrNull(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
+function joinAddress(part) {
+  if (!part) return "";
+  return [
+    part.address1,
+    part.address2,
+    part.city,
+    part.province,
+    part.postal_code || part.zip,
+    part.country,
+  ].filter(Boolean).join(", ");
 }
 
-async function resolveCoordinates({
-  pickupAddress,
-  pickupLat,
-  pickupLng,
-  dropoffAddress,
-  dropoffLat,
-  dropoffLng,
-  countryBias,
-}) {
-  const pickupGeo =
-    (Number.isFinite(pickupLat) && Number.isFinite(pickupLng))
-      ? { lat: pickupLat, lng: pickupLng }
-      : await geocodeAddress(pickupAddress, countryBias);
-
-  if (!pickupGeo) return [null, null];
-
-  const dropoffGeo =
-    (Number.isFinite(dropoffLat) && Number.isFinite(dropoffLng))
-      ? { lat: dropoffLat, lng: dropoffLng }
-      : await geocodeAddress(dropoffAddress, countryBias, pickupGeo);
-
-  return [pickupGeo, dropoffGeo];
+function toNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 function buildViewbox(lat, lng, delta = 0.27) {
@@ -248,4 +205,18 @@ async function geocodeAddress(address, countryCodeLower, bias) {
     await new Promise((r) => setTimeout(r, 200));
   }
   return null;
+}
+
+function maybeDebug(obj) {
+  return process.env.DEBUG === "1" ? obj : { rates: obj.rates || [] };
+}
+
+function maybePayload(p) {
+  // avoid echoing full payload in non-debug mode
+  return process.env.DEBUG === "1" ? p : undefined;
+}
+
+async function safeText(resp) {
+  if (!resp) return "";
+  try { return await resp.text(); } catch { return ""; }
 }
