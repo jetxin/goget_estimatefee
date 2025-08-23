@@ -207,7 +207,6 @@ async function resolveGeo({ address, countryBias = "", fallbackEnvLat = null, fa
       near.lng + 0.1,
       near.lat - 0.1,
     ].join(","));
-    params.set("bounded", "1");
   }
 
   const url = `https://nominatim.openstreetmap.org/search?${params.toString()}`;
