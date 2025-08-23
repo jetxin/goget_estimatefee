@@ -1,9 +1,7 @@
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
-  // Auth via query token (Shopify cannot send custom headers)
   const providedToken = (req.query && req.query.token) || null;
-
   if (process.env.RATE_CALLBACK_TOKEN && providedToken !== process.env.RATE_CALLBACK_TOKEN) {
     return res.status(401).json({ rates: [] });
   }
@@ -12,7 +10,6 @@ export default async function handler(req, res) {
     const body = req.body || {};
     const rate = body.rate || {};
 
-    // Required env
     const gogetEndpoint = process.env.GOGET_API_ENDPOINT;
     const gogetToken = process.env.GOGET_API_TOKEN;
     if (!gogetEndpoint || !gogetToken) {
@@ -20,7 +17,6 @@ export default async function handler(req, res) {
     }
     const authorizationHeader = `Token token=${gogetToken}`;
 
-    // Build pickup and dropoff from Shopify payload
     const pickupName = process.env.DEFAULT_PICKUP_NAME || rate.origin?.name || "Shop Origin";
 
     const pickupAddress = joinAddress(rate.origin);
@@ -30,8 +26,9 @@ export default async function handler(req, res) {
       return res.json(maybeDebug({ rates: [], reason: "missing_addresses" }));
     }
 
-    // Resolve coordinates
-    const countryBias = (rate.destination?.country || rate.origin?.country || "").toLowerCase();
+    // Normalize country for Nominatim
+    const countryBias = normalizeCountry(rate.destination?.country || rate.origin?.country);
+
     const pickupLatEnv = toNum(process.env.DEFAULT_PICKUP_LAT);
     const pickupLngEnv = toNum(process.env.DEFAULT_PICKUP_LNG);
 
@@ -49,10 +46,8 @@ export default async function handler(req, res) {
       return res.json(maybeDebug({ rates: [], reason: "geocode_dropoff_failed" }));
     }
 
-    // Start time: now + 5 minutes
     const startAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
 
-    // GoGet payload
     const gogetPayload = {
       pickup: {
         name: pickupName,
@@ -77,7 +72,6 @@ export default async function handler(req, res) {
       route: false,
     };
 
-    // Call GoGet
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 4000);
     const ggResp = await fetch(gogetEndpoint, {
@@ -107,10 +101,7 @@ export default async function handler(req, res) {
       return res.json(maybeDebug({ rates: [], reason: "no_fee_in_response", quote }));
     }
 
-    // Convert to subunits
-    const priceMinor = Math.round(fee * 100); // RM 13.00 -> "1300"
-
-    // Use Shopify's checkout currency if available
+    const priceMinor = Math.round(fee * 100);
     const shopCurrency = rate.currency || "MYR";
 
     const responseBody = {
@@ -127,7 +118,7 @@ export default async function handler(req, res) {
 
     return res.json(maybeDebug({ ...responseBody, gogetFee: fee, payloadSent: maybePayload(gogetPayload) }));
   } catch (e) {
-    console.error("Handler error:", e); // log stack in Vercel
+    console.error("Handler error:", e);
     return res.status(500).json({
       rates: [],
       reason: e.message || "unhandled_error",
@@ -145,13 +136,22 @@ function joinAddress(part) {
   return [
     part.address1,
     part.city,
-    part.province,
     part.postal_code || part.zip,
+    part.province,
     part.country,
   ]
     .map((s) => (s || "").trim())
     .filter(Boolean)
     .join(", ");
+}
+
+function normalizeCountry(codeOrName) {
+  if (!codeOrName) return "";
+  const map = {
+    malaysia: "my",
+    my: "my",
+  };
+  return map[codeOrName.toLowerCase()] || "";
 }
 
 function toNum(v) {
@@ -176,12 +176,8 @@ async function safeText(resp) {
   }
 }
 
-
 /**
- * Geocode an address using OpenStreetMap (Nominatim).
- * @param {string} address - Full address string
- * @param {string} countryBias - ISO2 country code (optional)
- * @param {object} near - optional { lat, lng } to bias search
+ * Geocode with OpenStreetMap (Nominatim)
  */
 async function geocodeAddress(address, countryBias = "", near = null) {
   if (!address) return null;
@@ -204,17 +200,27 @@ async function geocodeAddress(address, countryBias = "", near = null) {
   }
 
   const url = `https://nominatim.openstreetmap.org/search?${params.toString()}`;
+  console.log("Geocode query:", url); // 🔎 log the actual URL
 
   const resp = await fetch(url, {
     headers: {
-      "User-Agent": "Shopify-CarrierService-Demo/1.0 (your-email@example.com)",
+      "User-Agent": "Shopify-CarrierService-Demo/1.0 jetxin@live.com",
     },
-  }).catch(() => null);
+  }).catch((err) => {
+    console.error("Geocode fetch error:", err);
+    return null;
+  });
 
-  if (!resp || !resp.ok) return null;
+  if (!resp || !resp.ok) {
+    console.warn("Geocode failed:", address, "countryBias:", countryBias);
+    return null;
+  }
 
   const results = await resp.json().catch(() => []);
-  if (!results.length) return null;
+  if (!results.length) {
+    console.warn("No geocode results:", address, "countryBias:", countryBias);
+    return null;
+  }
 
   return {
     lat: parseFloat(results[0].lat),
