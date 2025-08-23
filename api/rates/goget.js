@@ -113,9 +113,9 @@ export default async function handler(req, res) {
     const responseBody = {
       rates: [
         {
-          service_name: "GoGet Delivery",
+          service_name: "Delivery Partner",
           service_code: "GOGET_NOW",
-          description: "Estimated courier delivery fee via GoGet",
+          description: "Courier delivery fee",
           total_price: String(priceMinor),
           currency: shopCurrency,
         },
