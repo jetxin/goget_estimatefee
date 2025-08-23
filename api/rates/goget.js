@@ -127,50 +127,11 @@ export default async function handler(req, res) {
 
     return res.json(maybeDebug({ ...responseBody, gogetFee: fee, payloadSent: maybePayload(gogetPayload) }));
   } catch (e) {
-    return res.json(maybeDebug({ rates: [], reason: "unhandled_error" }));
-  }
-}
-
-/**
- * Build a full address string from Shopify parts.
- */
-function joinAddress(part) {
-  if (!part) return "";
-
-  return [
-    part.name,          // person’s name
-    part.company_name,  // business if any
-    part.address1,
-    part.address2,
-    part.address3,
-    part.city,
-    part.province,
-    part.postal_code || part.zip,
-    part.country,
-  ]
-    .map((s) => (s || "").trim())
-    .filter(Boolean)
-    .join(", ");
-}
-
-function toNum(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-function maybeDebug(obj) {
-  return process.env.DEBUG === "1" ? obj : { rates: obj.rates || [] };
-}
-
-function maybePayload(p) {
-  return process.env.DEBUG === "1" ? p : undefined;
-}
-
-async function safeText(resp) {
-  if (!resp) return "";
-  try {
-    return await resp.text();
-  } catch {
-    return "";
+    console.error("Handler error:", e); // <-- logs full stack in Vercel
+    return res.status(500).json({
+      rates: [],
+      reason: e.message || "unhandled_error",
+      stack: process.env.DEBUG === "1" ? e.stack : undefined,
+    });
   }
 }
