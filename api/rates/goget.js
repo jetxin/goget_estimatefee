@@ -143,11 +143,7 @@ export default async function handler(req, res) {
 function joinAddress(part) {
   if (!part) return "";
   return [
-    part.name,
-    part.company_name,
     part.address1,
-    part.address2,
-    part.address3,
     part.city,
     part.province,
     part.postal_code || part.zip,
