@@ -157,3 +157,20 @@ function toNum(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
+
+function maybeDebug(obj) {
+  return process.env.DEBUG === "1" ? obj : { rates: obj.rates || [] };
+}
+
+function maybePayload(p) {
+  return process.env.DEBUG === "1" ? p : undefined;
+}
+
+async function safeText(resp) {
+  if (!resp) return "";
+  try {
+    return await resp.text();
+  } catch {
+    return "";
+  }
+}
