@@ -26,7 +26,7 @@ export default async function handler(req, res) {
       return res.json(maybeDebug({ rates: [], reason: "missing_addresses" }));
     }
 
-    // Normalize country for Nominatim
+    // Normalize country for Nominatim bias
     const countryBias = normalizeCountry(rate.destination?.country || rate.origin?.country);
 
     // Pickup geocode (env fallback → geocode)
@@ -137,27 +137,62 @@ export default async function handler(req, res) {
  * Helpers
  */
 
+// ✅ Normalization maps
+const stateMap = {
+  JHR: "Johor",
+  KDH: "Kedah",
+  KTN: "Kelantan",
+  MLK: "Melaka",
+  NSN: "Negeri Sembilan",
+  PHG: "Pahang",
+  PRK: "Perak",
+  PLS: "Perlis",
+  PNG: "Pulau Pinang",
+  SGR: "Selangor",
+  TRG: "Terengganu",
+  SBH: "Sabah",
+  SWK: "Sarawak",
+  KUL: "Kuala Lumpur",
+  LBN: "Labuan",
+  PJY: "Putrajaya",
+};
+
+const countryMap = {
+  MY: "Malaysia",
+  malaysia: "Malaysia",
+};
+
 function joinAddress(part) {
   if (!part) return "";
   return [
     part.address1,
     part.city,
     part.postal_code || part.zip,
-    part.province,
-    part.country,
+    normalizeState(part.province),
+    normalizeCountryFull(part.country),
   ]
     .map((s) => (s || "").trim())
     .filter(Boolean)
     .join(", ");
 }
 
-function normalizeCountry(codeOrName) {
+function normalizeState(stateCodeOrName = "") {
+  if (!stateCodeOrName) return "";
+  const upper = stateCodeOrName.toUpperCase();
+  return stateMap[upper] || stateCodeOrName;
+}
+
+function normalizeCountry(codeOrName = "") {
   if (!codeOrName) return "";
-  const map = {
-    malaysia: "my",
-    my: "my",
-  };
-  return map[codeOrName.toLowerCase()] || "";
+  const lower = codeOrName.toLowerCase();
+  if (lower === "my" || lower === "malaysia") return "my"; // for bias param
+  return "";
+}
+
+function normalizeCountryFull(codeOrName = "") {
+  if (!codeOrName) return "";
+  const upper = codeOrName.toUpperCase();
+  return countryMap[upper] || codeOrName;
 }
 
 function toNum(v) {
@@ -207,6 +242,7 @@ async function resolveGeo({ address, countryBias = "", fallbackEnvLat = null, fa
       near.lng + 0.1,
       near.lat - 0.1,
     ].join(","));
+    // no bounded=1 → keeps results flexible
   }
 
   const url = `https://nominatim.openstreetmap.org/search?${params.toString()}`;
