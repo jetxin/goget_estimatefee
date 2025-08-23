@@ -29,19 +29,25 @@ export default async function handler(req, res) {
     // Normalize country for Nominatim
     const countryBias = normalizeCountry(rate.destination?.country || rate.origin?.country);
 
-    const pickupLatEnv = toNum(process.env.DEFAULT_PICKUP_LAT);
-    const pickupLngEnv = toNum(process.env.DEFAULT_PICKUP_LNG);
-
-    const pickupGeo =
-      Number.isFinite(pickupLatEnv) && Number.isFinite(pickupLngEnv)
-        ? { lat: pickupLatEnv, lng: pickupLngEnv }
-        : await geocodeAddress(pickupAddress, countryBias);
+    // Pickup geocode (env fallback → geocode)
+    const pickupGeo = await resolveGeo({
+      address: pickupAddress,
+      countryBias,
+      fallbackEnvLat: toNum(process.env.DEFAULT_PICKUP_LAT),
+      fallbackEnvLng: toNum(process.env.DEFAULT_PICKUP_LNG),
+    });
 
     if (!pickupGeo) {
       return res.json(maybeDebug({ rates: [], reason: "geocode_pickup_failed" }));
     }
 
-    const dropoffGeo = await geocodeAddress(dropoffAddress, countryBias, pickupGeo);
+    // Dropoff geocode (always via lookup, biased near pickup)
+    const dropoffGeo = await resolveGeo({
+      address: dropoffAddress,
+      countryBias,
+      near: pickupGeo,
+    });
+
     if (!dropoffGeo) {
       return res.json(maybeDebug({ rates: [], reason: "geocode_dropoff_failed" }));
     }
@@ -177,11 +183,16 @@ async function safeText(resp) {
 }
 
 /**
- * Geocode with OpenStreetMap (Nominatim)
+ * Reusable geocode resolver
  */
-async function geocodeAddress(address, countryBias = "", near = null) {
-  if (!address) return null;
+async function resolveGeo({ address, countryBias = "", fallbackEnvLat = null, fallbackEnvLng = null, near = null }) {
+  // Step 1: env fallback (pickup)
+  if (Number.isFinite(fallbackEnvLat) && Number.isFinite(fallbackEnvLng)) {
+    return { lat: fallbackEnvLat, lng: fallbackEnvLng };
+  }
 
+  // Step 2: geocode via Nominatim
+  if (!address) return null;
   const params = new URLSearchParams({
     q: address,
     format: "json",
@@ -200,27 +211,19 @@ async function geocodeAddress(address, countryBias = "", near = null) {
   }
 
   const url = `https://nominatim.openstreetmap.org/search?${params.toString()}`;
-  console.log("Geocode query:", url); // 🔎 log the actual URL
+  console.log("Geocode query:", url);
 
   const resp = await fetch(url, {
-    headers: {
-      "User-Agent": "Shopify-CarrierService-Demo/1.0 jetxin@live.com",
-    },
+    headers: { "User-Agent": "Shopify-CarrierService-Demo/1.0 jetxin@live.com" },
   }).catch((err) => {
     console.error("Geocode fetch error:", err);
     return null;
   });
 
-  if (!resp || !resp.ok) {
-    console.warn("Geocode failed:", address, "countryBias:", countryBias);
-    return null;
-  }
+  if (!resp || !resp.ok) return null;
 
   const results = await resp.json().catch(() => []);
-  if (!results.length) {
-    console.warn("No geocode results:", address, "countryBias:", countryBias);
-    return null;
-  }
+  if (!results.length) return null;
 
   return {
     lat: parseFloat(results[0].lat),
