@@ -179,3 +179,49 @@ async function safeText(resp) {
     return "";
   }
 }
+
+
+/**
+ * Geocode an address using OpenStreetMap (Nominatim).
+ * @param {string} address - Full address string
+ * @param {string} countryBias - ISO2 country code (optional)
+ * @param {object} near - optional { lat, lng } to bias search
+ */
+async function geocodeAddress(address, countryBias = "", near = null) {
+  if (!address) return null;
+
+  const params = new URLSearchParams({
+    q: address,
+    format: "json",
+    limit: "1",
+  });
+
+  if (countryBias) params.set("countrycodes", countryBias);
+  if (near?.lat && near?.lng) {
+    params.set("viewbox", [
+      near.lng - 0.1,
+      near.lat + 0.1,
+      near.lng + 0.1,
+      near.lat - 0.1,
+    ].join(","));
+    params.set("bounded", "1");
+  }
+
+  const url = `https://nominatim.openstreetmap.org/search?${params.toString()}`;
+
+  const resp = await fetch(url, {
+    headers: {
+      "User-Agent": "Shopify-CarrierService-Demo/1.0 (your-email@example.com)",
+    },
+  }).catch(() => null);
+
+  if (!resp || !resp.ok) return null;
+
+  const results = await resp.json().catch(() => []);
+  if (!results.length) return null;
+
+  return {
+    lat: parseFloat(results[0].lat),
+    lng: parseFloat(results[0].lon),
+  };
+}
