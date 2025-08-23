@@ -115,7 +115,7 @@ export default async function handler(req, res) {
         {
           service_name: "GoGet Delivery",
           service_code: "GOGET_NOW",
-          description: "Real-time courier delivery via GoGet",
+          description: "Estimated courier delivery fee via GoGet",
           total_price: String(priceMinor),
           currency: shopCurrency,
         },
